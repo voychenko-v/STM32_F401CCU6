@@ -1,0 +1,38 @@
+# ---- STM32CubeIDE / Eclipse ----
+Debug/
+Release/
+build/
+cmake-build-*/
+.metadata/
+.settings/
+*.launch
+
+# ---- STM32CubeMX ----
+*.ioc.bak
+
+# ---- Об'єктні файли та бінарники ----
+*.o
+*.obj
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+*.su
+*.d
+
+# ---- Логи, тимчасові файли ----
+*.log
+*.tmp
+
+# ---- ОС-специфічні файли ----
+.DS_Store
+Thumbs.db
+
+# ---- IDE (VS Code, якщо хтось використовує) ----
+.vscode/
+*.code-workspace
+
+# ---- Архіви (якщо не потрібні в репо) ----
+*.zip
+*.tar.gz
