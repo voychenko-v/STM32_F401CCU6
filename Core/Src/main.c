@@ -1,29 +1,27 @@
 /* USER CODE BEGIN Header */
 /**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : Main program body
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2026 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "usb_device.h"
-#include "usbd_cdc_if.h"
+#include "traffic_lights.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,9 +31,16 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define LOW_VALUE 500
-#define MEDIUM_VALUE 2000
-#define HIGH_VALUE 3000
+#define LED_ACTIV_TIME        1500u
+#define BLINK_INTERVAL        100u
+#define BLINK_COUNT           (LED_ACTIV_TIME / BLINK_INTERVAL)
+
+#define LED_GREEN_PORT   GPIOA
+#define LED_GREEN_PIN    LED_GREEN_Pin
+#define LED_YELLOW_PORT  GPIOA
+#define LED_YELLOW_PIN   LED_YELLOW_Pin
+#define LED_RED_PORT     GPIOA
+#define LED_RED_PIN      LED_RED_Pin
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -44,7 +49,7 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
+TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
 
@@ -53,14 +58,163 @@ ADC_HandleTypeDef hadc1;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_ADC1_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    static uint32_t last_press_tick = 0;
 
+    if (GPIO_Pin == BUTOON_Pin) {
+        uint32_t now = HAL_GetTick();
+        if (now - last_press_tick < 100) {
+            return;
+        }
+        last_press_tick = now;
+
+        traffic_lights_button_pressed();
+    }
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    traffic_lights_timer_callback(htim);
+}
+
+typedef struct {
+    led_state_t state;
+    uint16_t    blink_left;
+    bool        led_on;
+} traffic_lights_t;
+
+static traffic_lights_t led_current = {
+    .state = GREEN,
+    .blink_left = 0,
+    .led_on = true
+};
+
+static TIM_HandleTypeDef *fsm_htim = NULL;
+
+#define TIMER_TICKS_PER_MS   10u   // 10 тіків по 0.1мс = 1мс
+
+/* Перезапускає таймер із заданим періодом (мс) */
+static void set_timer_period_ms(uint32_t period_ms)
+{
+    uint32_t ticks = period_ms * TIMER_TICKS_PER_MS;
+
+    HAL_TIM_Base_Stop_IT(fsm_htim);
+    __HAL_TIM_SET_COUNTER(fsm_htim, 0);
+    __HAL_TIM_SET_AUTORELOAD(fsm_htim, ticks - 1);
+    __HAL_TIM_CLEAR_FLAG(fsm_htim, TIM_FLAG_UPDATE);
+    HAL_TIM_Base_Start_IT(fsm_htim);
+}
+
+static void enter_state(led_state_t new_state)
+{
+    led_current.state = new_state;
+
+    switch (new_state) {
+        case GREEN:
+            HAL_GPIO_WritePin(LED_GREEN_PORT,  LED_GREEN_PIN,  GPIO_PIN_SET);
+            HAL_GPIO_WritePin(LED_YELLOW_PORT, LED_YELLOW_PIN, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(LED_RED_PORT,    LED_RED_PIN,    GPIO_PIN_RESET);
+            set_timer_period_ms(LED_ACTIV_TIME);
+            break;
+
+        case GREEN_BLINK:
+            led_current.blink_left = BLINK_COUNT;
+            led_current.led_on = true;
+            HAL_GPIO_WritePin(LED_GREEN_PORT, LED_GREEN_PIN, GPIO_PIN_SET);
+            set_timer_period_ms(BLINK_INTERVAL);
+            break;
+
+        case YELLOW:
+            HAL_GPIO_WritePin(LED_GREEN_PORT,  LED_GREEN_PIN,  GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(LED_YELLOW_PORT, LED_YELLOW_PIN, GPIO_PIN_SET);
+            set_timer_period_ms(LED_ACTIV_TIME);
+            break;
+
+        case RED:
+            HAL_GPIO_WritePin(LED_YELLOW_PORT, LED_YELLOW_PIN, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(LED_RED_PORT,    LED_RED_PIN,    GPIO_PIN_SET);
+            set_timer_period_ms(LED_ACTIV_TIME);
+            break;
+
+        case RED_YELLOW:
+            HAL_GPIO_WritePin(LED_YELLOW_PORT, LED_YELLOW_PIN, GPIO_PIN_SET);
+            set_timer_period_ms(LED_ACTIV_TIME);
+            break;
+
+        case YELLOW_BLINK:
+            HAL_GPIO_WritePin(LED_GREEN_PORT, LED_GREEN_PIN, GPIO_PIN_RESET);
+            HAL_GPIO_WritePin(LED_RED_PORT,   LED_RED_PIN,   GPIO_PIN_RESET);
+            led_current.led_on = true;
+            HAL_GPIO_WritePin(LED_YELLOW_PORT, LED_YELLOW_PIN, GPIO_PIN_SET);
+            set_timer_period_ms(BLINK_INTERVAL);
+            break;
+    }
+}
+
+void traffic_lights_init(TIM_HandleTypeDef *htim)
+{
+    fsm_htim = htim;
+    enter_state(GREEN);
+}
+
+
+void traffic_lights_timer_callback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance != fsm_htim->Instance) {
+        return;
+    }
+
+    switch (led_current.state) {
+        case GREEN:
+            enter_state(GREEN_BLINK);
+            break;
+
+        case GREEN_BLINK:
+            led_current.led_on = !led_current.led_on;
+            HAL_GPIO_WritePin(LED_GREEN_PORT, LED_GREEN_PIN,
+                               led_current.led_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+            if (--led_current.blink_left == 0) {
+                enter_state(YELLOW);
+            }
+            break;
+
+        case YELLOW:
+            enter_state(RED);
+            break;
+
+        case RED:
+            enter_state(RED_YELLOW);
+            break;
+
+        case RED_YELLOW:
+            enter_state(GREEN);
+            break;
+
+        case YELLOW_BLINK:
+            led_current.led_on = !led_current.led_on;
+            HAL_GPIO_WritePin(LED_YELLOW_PORT, LED_YELLOW_PIN,
+                               led_current.led_on ? GPIO_PIN_SET : GPIO_PIN_RESET);
+            break;
+    }
+}
+
+
+void traffic_lights_button_pressed(void)
+{
+    if (led_current.state == YELLOW_BLINK) {
+        enter_state(GREEN);
+    } else {
+        enter_state(YELLOW_BLINK);
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -92,54 +246,21 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_ADC1_Init();
-  MX_USB_DEVICE_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
+  HAL_TIM_Base_Start_IT(&htim3);
 
+  traffic_lights_init(&htim3);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1)
-  {
-	  HAL_ADC_Start(&hadc1);
-	  HAL_ADC_PollForConversion(&hadc1, 100);
-	  uint32_t adc_value = HAL_ADC_GetValue(&hadc1);
-	  HAL_ADC_Stop(&hadc1);
-
-	  char msg[50];
-	  int len = sprintf(msg, "Analog value: %lu\r\n", adc_value);
-	  CDC_Transmit_FS((uint8_t*)msg, len);
-
-
-	  uint16_t leds_to_set = 0;
-
-	  if (adc_value < LOW_VALUE)
-	  {
-	      leds_to_set = LED_WHITE_Pin;
-	  }
-	  else if (adc_value < MEDIUM_VALUE)
-	  {
-	      leds_to_set = LED_GREEN_Pin;
-	  }
-	  else if (adc_value < HIGH_VALUE)
-	  {
-	      leds_to_set = LED_GREEN_Pin | LED_YELLOW_Pin;
-	  }
-	  else
-	  {
-	      leds_to_set = LED_GREEN_Pin | LED_YELLOW_Pin | LED_RED_Pin;
-	  }
-
-	  HAL_GPIO_WritePin(GPIOA, LED_WHITE_Pin | LED_GREEN_Pin | LED_YELLOW_Pin | LED_RED_Pin, GPIO_PIN_RESET);
-	  HAL_GPIO_WritePin(GPIOA, leds_to_set, GPIO_PIN_SET);
-
-	  HAL_Delay(300);
+	while (1) {
 
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-  }
+	}
   /* USER CODE END 3 */
 }
 
@@ -160,15 +281,14 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 16;
-  RCC_OscInitStruct.PLL.PLLN = 192;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 25;
+  RCC_OscInitStruct.PLL.PLLN = 168;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 4;
+  RCC_OscInitStruct.PLL.PLLQ = 7;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -178,66 +298,59 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
 }
 
 /**
-  * @brief ADC1 Initialization Function
+  * @brief TIM3 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_ADC1_Init(void)
+static void MX_TIM3_Init(void)
 {
 
-  /* USER CODE BEGIN ADC1_Init 0 */
+  /* USER CODE BEGIN TIM3_Init 0 */
 
-  /* USER CODE END ADC1_Init 0 */
+  /* USER CODE END TIM3_Init 0 */
 
-  ADC_ChannelConfTypeDef sConfig = {0};
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
 
-  /* USER CODE BEGIN ADC1_Init 1 */
+  /* USER CODE BEGIN TIM3_Init 1 */
 
-  /* USER CODE END ADC1_Init 1 */
-
-  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
-  */
-  hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
-  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.ScanConvMode = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 8399;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 9999;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
   }
-
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_9;
-  sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN ADC1_Init 2 */
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
 
-  /* USER CODE END ADC1_Init 2 */
+  /* USER CODE END TIM3_Init 2 */
 
 }
 
@@ -254,18 +367,28 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, LED_WHITE_Pin|LED_GREEN_Pin|LED_YELLOW_Pin|LED_RED_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, LED_GREEN_Pin|LED_YELLOW_Pin|LED_RED_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : LED_WHITE_Pin LED_GREEN_Pin LED_YELLOW_Pin LED_RED_Pin */
-  GPIO_InitStruct.Pin = LED_WHITE_Pin|LED_GREEN_Pin|LED_YELLOW_Pin|LED_RED_Pin;
+  /*Configure GPIO pins : LED_GREEN_Pin LED_YELLOW_Pin LED_RED_Pin */
+  GPIO_InitStruct.Pin = LED_GREEN_Pin|LED_YELLOW_Pin|LED_RED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : BUTOON_Pin */
+  GPIO_InitStruct.Pin = BUTOON_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(BUTOON_GPIO_Port, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -283,11 +406,10 @@ static void MX_GPIO_Init(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
-  {
-  }
+	/* User can add his own implementation to report the HAL error return state */
+	__disable_irq();
+	while (1) {
+	}
   /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
