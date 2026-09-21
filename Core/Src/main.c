@@ -53,7 +53,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM1_Init(void);
 /* USER CODE BEGIN PFP */
-
+static void reset_code_entry(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -61,13 +61,21 @@ static void MX_TIM1_Init(void);
 #include <stdbool.h>
 
 int _write(int file, char *ptr, int len) {
-    CDC_Transmit_FS((uint8_t*)ptr, len);
+    uint32_t start = HAL_GetTick();
+    while (CDC_Transmit_FS((uint8_t*)ptr, len) == USBD_BUSY) {
+        if (HAL_GetTick() - start > 50) {
+            break;
+        }
+    }
     return len;
 }
-
 #define COMBO_LENGTH   3
 #define RING_SIZE      10
 #define MAX_ATTEMPTS   3
+
+#define BTN_Pin             GPIO_PIN_4
+#define BTN_GPIO_Port       GPIOA
+#define BTN_DEBOUNCE_MS     50U
 
 typedef enum {
     DIR_NONE = 0,
@@ -89,6 +97,46 @@ static uint8_t entered_code[COMBO_LENGTH];
 static uint8_t reversal_count = 0;
 static uint8_t wrong_attempts = 0;
 static bool unlocked = false;
+
+// Прапорці, що виставляються з переривань
+static volatile bool btn_pressed_flag = false;
+static volatile uint32_t btn_last_tick = 0;
+static volatile bool locked_out = false;
+
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin != BTN_Pin) {
+        return;
+    }
+
+    uint32_t now = HAL_GetTick();
+
+    if ((now - btn_last_tick) < BTN_DEBOUNCE_MS) {
+        return;
+    }
+
+    if (HAL_GPIO_ReadPin(BTN_GPIO_Port, BTN_Pin) != GPIO_PIN_RESET) {
+        return;
+    }
+
+    btn_last_tick = now;
+    btn_pressed_flag = true;
+}
+
+static void handle_button_press(void)
+{
+    if (!btn_pressed_flag) {
+        return;
+    }
+    btn_pressed_flag = false;
+
+    if (unlocked || locked_out) {
+        return;
+    }
+
+    reset_code_entry();
+    printf("Button pressed: code entry reset. New attempt started.\r\n");
+}
 
 // Повертає true, якщо на цій ітерації відбувся рух хоча б на 1 X4-крок
 static bool update_encoder_steps(int32_t *out_full_steps) {
@@ -134,14 +182,16 @@ static void handle_unlock_attempt(void) {
         // Додати реалізацію що буде відбуватись при правильному коді
     } else {
         wrong_attempts++;
-        printf("Wrong code (%u/%u attempts). Entered: %u %u %u\r\n",
-               wrong_attempts, MAX_ATTEMPTS,
+        uint8_t attempts_left = MAX_ATTEMPTS - wrong_attempts;
+
+        printf("Wrong code: %u %u %u. ",
                entered_code[0], entered_code[1], entered_code[2]);
 
-        if (wrong_attempts >= MAX_ATTEMPTS) {
-            printf("Too many wrong attempts. Resetting MCU...\r\n");
-            HAL_Delay(200);
-            NVIC_SystemReset();
+        if (attempts_left > 0) {
+            printf("Attempts left: %u\r\n", attempts_left);
+        } else {
+            printf("No attempts left.\r\n");
+            locked_out = true;
         }
     }
 
@@ -150,7 +200,7 @@ static void handle_unlock_attempt(void) {
 
 
 static void process_safe_dial(void) {
-    if (unlocked) {
+    if (unlocked || locked_out) {
         return;
     }
 
@@ -171,8 +221,10 @@ static void process_safe_dial(void) {
     }
 
     if (new_dir != current_dir) {
+
         entered_code[reversal_count] = (uint8_t)ring_before;
-        printf("Digit %u confirmed: %ld\r\n", reversal_count + 1, ring_before);
+        printf("Dial: %ld Digit %u confirmed: %ld\r\n",
+               ring_index, reversal_count + 1, ring_before);
 
         reversal_count++;
         current_dir = new_dir;
@@ -226,14 +278,25 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  while (1)
+  while (!locked_out)
   {
+      handle_button_press();
       process_safe_dial();
       HAL_Delay(20);
 
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+  }
+  printf("All attempts used. Safe is LOCKED. Reboot the MCU to try again.\r\n");
+  HAL_Delay(200);
+
+  HAL_NVIC_DisableIRQ(EXTI4_IRQn);
+  HAL_TIM_Encoder_Stop(&htim1, TIM_CHANNEL_ALL);
+
+  while (1)
+  {
+      __WFI();
   }
   /* USER CODE END 3 */
 }
@@ -340,6 +403,7 @@ static void MX_TIM1_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -347,6 +411,16 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /*Configure GPIO pin : PA4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
