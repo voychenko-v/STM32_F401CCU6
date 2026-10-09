@@ -19,23 +19,29 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "usb_device.h"
-#include "usbd_cdc_if.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include "usbd_cdc_if.h"
+#include "ssd1306.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+typedef struct {
+    uint8_t sec, min, hour;
+    uint8_t dow;
+    uint8_t day, month;
+    uint16_t year;
+} RtcTime;
 
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define LOW_VALUE 500
-#define MEDIUM_VALUE 2000
-#define HIGH_VALUE 3000
+#define RTC_ADDR (0x68 << 1)   // 0xD0
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -44,22 +50,54 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-ADC_HandleTypeDef hadc1;
+I2C_HandleTypeDef hi2c1;
 
 /* USER CODE BEGIN PV */
-
+static const char *dow_names[] = { "???", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_ADC1_Init(void);
+static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
-
+HAL_StatusTypeDef ds1307_read(RtcTime *t);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+int _write(int fd, char *ptr, int len)
+{
+    uint32_t t = HAL_GetTick();
+    while (CDC_Transmit_FS((uint8_t*)ptr, len) == USBD_BUSY)
+    {
+        if (HAL_GetTick() - t > 10) break;
+    }
+    return len;
+}
+
+
+uint8_t bcd_to_dec(uint8_t bcd) {
+    return ((bcd >> 4) * 10) + (bcd & 0x0F);
+}
+
+HAL_StatusTypeDef ds1307_read(RtcTime *t)
+{
+    uint8_t d[7];
+
+    HAL_StatusTypeDef st = HAL_I2C_Mem_Read(&hi2c1, RTC_ADDR, 0x00, I2C_MEMADD_SIZE_8BIT, d, 7, 50);
+    if (st != HAL_OK) return st;
+
+    t->sec   = bcd_to_dec(d[0] & 0x7F);
+    t->min   = bcd_to_dec(d[1]);
+    t->hour  = bcd_to_dec(d[2] & 0x3F);
+    t->dow   = bcd_to_dec(d[3] & 0x07);
+    t->day   = bcd_to_dec(d[4]);
+    t->month = bcd_to_dec(d[5] & 0x1F);
+    t->year  = 2000 + bcd_to_dec(d[6]);
+
+    return HAL_OK;
+}
 
 /* USER CODE END 0 */
 
@@ -92,50 +130,31 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_ADC1_Init();
   MX_USB_DEVICE_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
+  ssd1306_init();
+
+  RtcTime t;
+  char time_str[16], date_str[24];
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
   while (1)
   {
-	  HAL_ADC_Start(&hadc1);
-	  HAL_ADC_PollForConversion(&hadc1, 100);
-	  uint32_t adc_value = HAL_ADC_GetValue(&hadc1);
-	  HAL_ADC_Stop(&hadc1);
-
-	  char msg[50];
-	  int len = sprintf(msg, "Analog value: %lu\r\n", adc_value);
-	  CDC_Transmit_FS((uint8_t*)msg, len);
-
-
-	  uint16_t leds_to_set = 0;
-
-	  if (adc_value < LOW_VALUE)
-	  {
-	      leds_to_set = LED_WHITE_Pin;
-	  }
-	  else if (adc_value < MEDIUM_VALUE)
-	  {
-	      leds_to_set = LED_GREEN_Pin;
-	  }
-	  else if (adc_value < HIGH_VALUE)
-	  {
-	      leds_to_set = LED_GREEN_Pin | LED_YELLOW_Pin;
-	  }
-	  else
-	  {
-	      leds_to_set = LED_GREEN_Pin | LED_YELLOW_Pin | LED_RED_Pin;
-	  }
-
-	  HAL_GPIO_WritePin(GPIOA, LED_WHITE_Pin | LED_GREEN_Pin | LED_YELLOW_Pin | LED_RED_Pin, GPIO_PIN_RESET);
-	  HAL_GPIO_WritePin(GPIOA, leds_to_set, GPIO_PIN_SET);
-
-	  HAL_Delay(300);
-
+	    if (ds1307_read(&t) == HAL_OK)
+	    {
+	        snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d", t.hour, t.min, t.sec);
+	        snprintf(date_str, sizeof(date_str), "%s %02d.%02d.%04d", dow_names[t.dow], t.day, t.month, t.year);
+	        ssd1306_clear();
+	        ssd1306_draw_string(0, 0,  time_str, 2);
+	        ssd1306_draw_string(0, 24, date_str, 1);
+	        ssd1306_update();
+	    }
+	  HAL_Delay(250);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -160,15 +179,16 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 16;
-  RCC_OscInitStruct.PLL.PLLN = 192;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 15;
+  RCC_OscInitStruct.PLL.PLLN = 144;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 4;
+  RCC_OscInitStruct.PLL.PLLQ = 5;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -190,54 +210,36 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief ADC1 Initialization Function
+  * @brief I2C1 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_ADC1_Init(void)
+static void MX_I2C1_Init(void)
 {
 
-  /* USER CODE BEGIN ADC1_Init 0 */
+  /* USER CODE BEGIN I2C1_Init 0 */
 
-  /* USER CODE END ADC1_Init 0 */
+  /* USER CODE END I2C1_Init 0 */
 
-  ADC_ChannelConfTypeDef sConfig = {0};
+  /* USER CODE BEGIN I2C1_Init 1 */
 
-  /* USER CODE BEGIN ADC1_Init 1 */
-
-  /* USER CODE END ADC1_Init 1 */
-
-  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
-  */
-  hadc1.Instance = ADC1;
-  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV2;
-  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc1.Init.ScanConvMode = DISABLE;
-  hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.DiscontinuousConvMode = DISABLE;
-  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DMAContinuousRequests = DISABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 100000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN I2C1_Init 2 */
 
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_9;
-  sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC1_Init 2 */
-
-  /* USER CODE END ADC1_Init 2 */
+  /* USER CODE END I2C1_Init 2 */
 
 }
 
@@ -248,24 +250,14 @@ static void MX_ADC1_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, LED_WHITE_Pin|LED_GREEN_Pin|LED_YELLOW_Pin|LED_RED_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pins : LED_WHITE_Pin LED_GREEN_Pin LED_YELLOW_Pin LED_RED_Pin */
-  GPIO_InitStruct.Pin = LED_WHITE_Pin|LED_GREEN_Pin|LED_YELLOW_Pin|LED_RED_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
