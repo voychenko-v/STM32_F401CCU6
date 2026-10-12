@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include "usbd_cdc_if.h"
 #include "ssd1306.h"
+#include "bme280.h"
 
 /* USER CODE END Includes */
 
@@ -52,6 +53,8 @@ typedef struct {
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
 
+SPI_HandleTypeDef hspi1;
+
 /* USER CODE BEGIN PV */
 static const char *dow_names[] = { "???", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
 /* USER CODE END PV */
@@ -60,6 +63,7 @@ static const char *dow_names[] = { "???", "Mon", "Tue", "Wed", "Thu", "Fri", "Sa
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
+static void MX_SPI1_Init(void);
 /* USER CODE BEGIN PFP */
 HAL_StatusTypeDef ds1307_read(RtcTime *t);
 /* USER CODE END PFP */
@@ -132,11 +136,15 @@ int main(void)
   MX_GPIO_Init();
   MX_USB_DEVICE_Init();
   MX_I2C1_Init();
+  MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
   ssd1306_init();
+  if (bme280_init(&hspi1) != HAL_OK) printf("BME280 init failed\r\n");
 
-  RtcTime t;
-  char time_str[16], date_str[24];
+  RtcTime t = {0};
+  Bme280Data env = {0};
+  char time_str[16], date_str[24], t_str[24], h_str[24], p_str[24];
+  uint32_t last_rtc = 0, last_bme = 0;
 
   /* USER CODE END 2 */
 
@@ -145,16 +153,45 @@ int main(void)
 
   while (1)
   {
-	    if (ds1307_read(&t) == HAL_OK)
-	    {
-	        snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d", t.hour, t.min, t.sec);
-	        snprintf(date_str, sizeof(date_str), "%s %02d.%02d.%04d", dow_names[t.dow], t.day, t.month, t.year);
-	        ssd1306_clear();
-	        ssd1306_draw_string(0, 0,  time_str, 2);
-	        ssd1306_draw_string(0, 24, date_str, 1);
-	        ssd1306_update();
-	    }
-	  HAL_Delay(250);
+      uint32_t now = HAL_GetTick();
+
+      if (now - last_bme >= 1000) {
+          last_bme += 1000;
+          if (bme280_read(&env) != HAL_OK)
+              printf("BME280 read failed, err=0x%lX\r\n", hspi1.ErrorCode);
+      }
+
+      if (now - last_rtc >= 1000) {
+          last_rtc += 1000;
+
+          if (ds1307_read(&t) != HAL_OK) {
+              printf("RTC read failed, err=0x%lX\r\n", hi2c1.ErrorCode);
+          } else {
+              const char *dow = (t.dow >= 1 && t.dow <= 7) ? dow_names[t.dow] : dow_names[0];
+
+              int32_t tc = env.temp_c100;
+              char sign = (tc < 0) ? '-' : ' ';
+              if (tc < 0) tc = -tc;
+              uint32_t hum = (env.hum_q10 + 512) >> 10;
+
+              snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d", t.hour, t.min, t.sec);
+              snprintf(date_str, sizeof(date_str), "%s %02d.%02d.%04d", dow, t.day, t.month, t.year);
+              snprintf(t_str, sizeof(t_str), "T: %c%ld.%ld%cC", sign, tc / 100, (tc % 100) / 10, 0xF8);
+              snprintf(h_str, sizeof(h_str), "RH: %lu %%", hum);
+              snprintf(p_str, sizeof(p_str), "P: %lu hPa", env.press_pa / 100);
+
+              ssd1306_clear();
+              ssd1306_draw_string(0, 0,  time_str, 2);
+              ssd1306_draw_string(0, 18, date_str, 1);
+              ssd1306_draw_string(0, 30, t_str, 1);
+              ssd1306_draw_string(0, 40, h_str, 1);
+              ssd1306_draw_string(0, 50, p_str, 1);
+              ssd1306_update();
+
+              printf("%s | %s | %s | %s | %s\r\n", time_str, date_str, t_str, h_str, p_str);
+          }
+      }
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -244,12 +281,51 @@ static void MX_I2C1_Init(void)
 }
 
 /**
+  * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI1_Init(void)
+{
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 10;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -258,6 +334,16 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(BME_CS_GPIO_Port, BME_CS_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin : BME_CS_Pin */
+  GPIO_InitStruct.Pin = BME_CS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(BME_CS_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
